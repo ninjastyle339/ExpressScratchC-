@@ -14,7 +14,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <cerrno>
-
+#include <cstring>
 
 constexpr int BUFFER_SIZE = 1024;
 constexpr int MAX_EVENTS = 100;
@@ -204,65 +204,65 @@ int main(){
             //existing client has data
             else {
                 std::array<char, BUFFER_SIZE> buffer{};
-                ssize_t bytesReceived = recv(socket, buffer.data(), buffer.size(), 0);
-                if(bytesReceived < 0){
-                    if(errno == EAGAIN || errno == EWOULDBLOCK)
-                        continue;
-                    std::cerr << "recv failed\n";
-                    epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
-                    requestBuffers.erase(socket);
-                    close(socket);
-                    continue;
-                }
-                if(bytesReceived == 0){
-                    //std::cout << "Client disconnected: " << socket << '\n';
-                    epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
-                    requestBuffers.erase(socket);
-                    close(socket);
-                    continue;
-                }
-                // std::cout << "Received " << bytesReceived << " bytes from "
-                //           << socket << ": ";
-                // //std::cout.write(buffer.data(), bytesReceived);
-                // std::cout << '\n';
-                requestBuffers[socket].append(buffer.data(), bytesReceived);
+                while(true){
+                    ssize_t bytesReceived = recv(socket, buffer.data(), buffer.size(), 0);
+                    if(bytesReceived < 0){
+                        if(errno == EAGAIN || errno == EWOULDBLOCK)
+                            break;
+                        //std::cerr << "recv failed: " << strerror(errno) << '\n';
+                        epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
+                        requestBuffers.erase(socket);
+                        close(socket);
+                        break;
+                    }
+                    if(bytesReceived == 0){
+                        //std::cout << "Client disconnected: " << socket << '\n';
+                        epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
+                        requestBuffers.erase(socket);
+                        close(socket);
+                        break;
+                    }
+                    // std::cout << "Received " << bytesReceived << " bytes from "
+                    //           << socket << ": ";
+                    // //std::cout.write(buffer.data(), bytesReceived);
+                    // std::cout << '\n';
+                    requestBuffers[socket].append(buffer.data(), bytesReceived);
+                    std::string& requestData = requestBuffers[socket];
+                    std::size_t headerEnd = requestData.find("\r\n\r\n");
+                    while(headerEnd != std::string::npos){
+                        //parse http request
+                        HttpRequest request = parseRequest(requestData);
+                        std::size_t contentLength = 0;
+                        auto it = request.headers.find("Content-Length");
+                        if(it != request.headers.end()){
+                            contentLength = std::stoul(it->second);
+                        }
+                        std::size_t bodyStart = headerEnd + 4;
+                        std::size_t bodyLength = requestData.size() - bodyStart;
+                        if(bodyLength < contentLength)
+                            break;
+                        request.body = requestData.substr(bodyStart, contentLength);
+                        // std::cout << "Method: " << request.method << '\n';
+                        // std::cout << "Path: " << request.path << '\n';
+                        // std::cout << "Version: " << request.version << '\n';
+                        // for(const auto& [key, value] : request.headers){
+                        //     std::cout << key << ": " << value << '\n';
+                        // }
+                        //send http response
+                        
+                        HttpResponse response = router.route(request);
+                        std::string responseData = serializeResponse(response);
+                        send(socket, responseData.data(), responseData.size(), 0);
 
-                std::string& requestData = requestBuffers[socket];
-                std::size_t headerEnd = requestData.find("\r\n\r\n");
-                if(headerEnd == std::string::npos){
-                    continue;
+                        // epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
+                        // requestBuffers.erase(socket);
+                        // close(socket);
+                        requestBuffers[socket].erase(0, bodyStart + contentLength);
+                        
+                        headerEnd = requestData.find("\r\n\r\n");
+                    }
                 }
-                //parse http request
-                HttpRequest request = parseRequest(requestData);
-                std::size_t contentLength = 0;
-                auto it = request.headers.find("Content-Length");
-                if(it != request.headers.end()){
-                    contentLength = std::stoul(it->second);
-                }
-                std::size_t bodyStart = headerEnd + 4;
-                std::size_t bodyLength = requestData.size() - bodyStart;
-                if(bodyLength < contentLength)
-                    continue;
-                request.body = requestData.substr(bodyStart, contentLength);
-                // std::cout << "Method: " << request.method << '\n';
-                // std::cout << "Path: " << request.path << '\n';
-                // std::cout << "Version: " << request.version << '\n';
-                // for(const auto& [key, value] : request.headers){
-                //     std::cout << key << ": " << value << '\n';
-                // }
-                //send http response
                 
-                HttpResponse response = router.route(request);
-                std::string responseData = serializeResponse(response);
-                send(socket, responseData.data(), responseData.size(), 0);
-
-                epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
-                requestBuffers.erase(socket);
-                close(socket);
-                // if(sendStream(socket, buffer, bytesReceived) < 0) {
-                //     epoll_ctl(epollFd, EPOLL_CTL_DEL, socket, nullptr);
-                //     close(socket);
-                // }
             }
             
         }
